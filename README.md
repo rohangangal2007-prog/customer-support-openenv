@@ -1,3 +1,14 @@
+---
+title: Customer Support OpenEnv
+emoji: 🎧
+colorFrom: blue
+colorTo: green
+sdk: docker
+pinned: false
+tags:
+  - openenv
+---
+
 # CustomerSupport OpenEnv
 
 An OpenEnv-compliant reinforcement learning environment that simulates a
