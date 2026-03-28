@@ -1,0 +1,17 @@
+[project]
+name = "customer-support-openenv"
+version = "1.0.0"
+description = "OpenEnv-compliant customer support RL environment"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.29.0",
+    "pydantic>=2.0.0",
+    "openai>=1.0.0",
+    "requests>=2.31.0",
+    "pyyaml>=6.0",
+]
+
+[project.urls]
+Homepage = "https://huggingface.co/spaces/codebyRohan/customer-support-openenv"
+Repository = "https://github.com/rohangangal2007-prog/customer-support-openenv"
