@@ -2,12 +2,12 @@
 CustomerSupportEnv — OpenEnv-compliant reinforcement learning environment.
 
 Simulates a real-world customer support agent workflow.
-An AI agent processes support tickets by taking structured actions
-and receives partial reward signals throughout the episode.
+Each reset() samples a random ticket variant from the task's pool,
+making the environment suitable for genuine agent training and evaluation.
 """
 
 import copy
-from typing import Optional
+import random
 from models import (
     Observation, Action, StepResult, ResetResult, StateResult,
     TicketCategory, TicketPriority
@@ -22,6 +22,7 @@ class CustomerSupportEnv:
     The agent must handle a support ticket by taking a sequence of actions:
       classify → set_priority → draft_reply → add_note → resolve / escalate
 
+    Each reset() draws a new random ticket from the task's pool of variants.
     Rewards are given at each step for partial progress, not just at the end.
     """
 
@@ -36,16 +37,24 @@ class CustomerSupportEnv:
         self._steps: int = 0
         self._done: bool = False
         self._initialized: bool = False
+        self._current_ticket = None
 
     # ─── OpenEnv Interface ────────────────────────────────────────────────────
 
-    def reset(self) -> ResetResult:
-        """Reset the environment and return the initial observation."""
+    def reset(self, seed: int | None = None) -> ResetResult:
+        """
+        Reset the environment and return the initial observation.
+        Randomly samples a ticket variant from the task pool.
+        Pass seed for reproducibility.
+        """
         task = TASKS[self.task_id]
+        ticket = task.sample_ticket(seed=seed)
+        self._current_ticket = ticket
+
         self._state = {
             "task_id": self.task_id,
-            "ticket_id": task.ticket["ticket_id"],
-            "customer_message": task.ticket["customer_message"],
+            "ticket_id": ticket.ticket_id,
+            "customer_message": ticket.customer_message,
             "category": None,
             "priority": None,
             "last_reply": None,
@@ -54,6 +63,7 @@ class CustomerSupportEnv:
             "conversation_history": [],
             "step_number": 0,
             "done": False,
+            "_ticket": ticket,  # kept for grader access
         }
         self._episode_reward = 0.0
         self._steps = 0
@@ -71,6 +81,7 @@ class CustomerSupportEnv:
             raise RuntimeError("Episode is done. Call reset() to start a new one.")
 
         task = TASKS[self.task_id]
+        ticket = self._current_ticket
         self._steps += 1
         reward = 0.0
         info: dict = {"action_type": action.action_type, "valid": True}
@@ -90,12 +101,12 @@ class CustomerSupportEnv:
                 info["error"] = "classify action requires 'category' field"
             else:
                 self._state["category"] = action.category
-                if action.category == task.expected_category:
+                if action.category == ticket.expected_category:
                     reward = 0.2
                     info["feedback"] = "Correct category!"
                 else:
                     reward = -0.05
-                    info["feedback"] = "Incorrect category."
+                    info["feedback"] = f"Incorrect category. (hint: re-read the ticket carefully)"
 
         elif action.action_type == "set_priority":
             if action.priority is None:
@@ -103,7 +114,7 @@ class CustomerSupportEnv:
                 info["error"] = "set_priority action requires 'priority' field"
             else:
                 self._state["priority"] = action.priority
-                if action.priority == task.expected_priority:
+                if action.priority == ticket.expected_priority:
                     reward = 0.2
                     info["feedback"] = "Correct priority!"
                 else:
@@ -121,7 +132,7 @@ class CustomerSupportEnv:
                     "content": action.reply_text
                 })
                 reward = self._score_reply(action.reply_text, task)
-                info["feedback"] = f"Reply scored: {reward:.2f}"
+                info["feedback"] = f"Reply drafted and scored: {reward:.2f}"
 
         elif action.action_type == "add_note":
             if not action.note or len(action.note.strip()) < 5:
@@ -145,7 +156,6 @@ class CustomerSupportEnv:
                 info["error"] = "resolution_summary must be at least 20 characters."
             else:
                 self._state["resolution_summary"] = action.resolution_summary
-                # Final grader score
                 final_score = GRADERS[self.task_id](self._state)
                 reward = final_score
                 self._state["done"] = True
@@ -157,7 +167,7 @@ class CustomerSupportEnv:
         if self._steps >= task.max_steps and not self._done:
             self._done = True
             self._state["done"] = True
-            reward += -0.1  # small penalty for not finishing in time
+            reward += -0.1
             info["feedback"] = info.get("feedback", "") + " | Max steps reached."
 
         self._episode_reward += reward
@@ -181,6 +191,7 @@ class CustomerSupportEnv:
     def _build_observation(self) -> Observation:
         s = self._state
         task = TASKS[self.task_id]
+        ticket = self._current_ticket
         return Observation(
             ticket_id=s["ticket_id"],
             customer_message=s["customer_message"],
@@ -197,16 +208,18 @@ class CustomerSupportEnv:
                 "has_reply": s.get("last_reply") is not None,
                 "has_note": s.get("internal_note") is not None,
                 "is_resolved": s.get("resolution_summary") is not None,
+                "ticket_variant": ticket.ticket_id if ticket else None,
+                "num_ticket_variants": len(task.tickets),
             }
         )
 
     def _score_reply(self, reply: str, task) -> float:
-        """Partial reward for reply quality based on keywords."""
+        """Partial reward for reply quality using keyword ratio scoring."""
         if not task.good_reply_keywords:
-            return 0.15  # Task 1 doesn't need replies
+            return 0.15
         reply_lower = reply.lower()
-        hits = sum(1 for kw in task.good_reply_keywords if kw in reply_lower)
+        hit_ratio = sum(1 for kw in task.good_reply_keywords if kw in reply_lower) / len(task.good_reply_keywords)
         bad_hits = sum(1 for kw in task.bad_reply_keywords if kw in reply_lower)
-        score = min(0.25, hits * 0.04)
+        score = hit_ratio * 0.25
         score -= bad_hits * 0.05
-        return round(max(0.0, score), 4)
+        return round(max(0.0, min(score, 0.25)), 4)
