@@ -86,3 +86,11 @@ def state(task_id: str = Query("task1")):
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return result
+
+
+def main():
+    import uvicorn
+    uvicorn.run("server.app:app", host="0.0.0.0", port=7860)
+
+if __name__ == '__main__':
+    main()
