@@ -1,21 +1,34 @@
 """
 inference.py — Baseline agent for CustomerSupport OpenEnv
 
-Prints structured [START]/[STEP]/[END] blocks to stdout as required
-by the OpenEnv hackathon validator.
-
-Usage:
-  python inference.py --url http://localhost:7860
-  python inference.py --url https://codebyrohan-customer-support-openenv.hf.space
+Uses competition's LiteLLM proxy via API_BASE_URL, API_KEY, MODEL env vars.
+Prints [START]/[STEP]/[END] structured blocks to stdout.
 """
 
 import os
 import json
 import argparse
 import requests
+from openai import OpenAI
 
 DEFAULT_ENV_URL = "http://localhost:7860"
 TASKS = ["task1", "task2", "task3"]
+
+SYSTEM_PROMPT = """You are an expert customer support agent AI.
+Respond with exactly ONE JSON action object. No markdown, no explanation.
+
+Available actions:
+{"action_type": "classify", "category": "billing|technical|shipping|returns|general"}
+{"action_type": "set_priority", "priority": "low|medium|high"}
+{"action_type": "draft_reply", "reply_text": "..."}
+{"action_type": "add_note", "note": "..."}
+{"action_type": "resolve", "resolution_summary": "..."}
+
+For task1: classify then set_priority then resolve.
+For task2: classify then set_priority then draft_reply then resolve.
+For task3: classify then set_priority then draft_reply then add_note then resolve.
+Resolution must mention refund or replacement when relevant.
+"""
 
 
 def call_env(method, path, url, payload=None, params=None):
@@ -32,72 +45,27 @@ def call_env(method, path, url, payload=None, params=None):
         return None
 
 
-def get_action_for_obs(obs, step_num):
-    """
-    Rule-based agent — no LLM needed for baseline.
-    Deterministic actions based on task and step number.
-    """
-    task_id = obs.get("task_id", "task1")
-    msg = obs.get("customer_message", "").lower()
-
-    # Determine category from message keywords
-    if any(w in msg for w in ["charge", "charged", "bill", "refund", "payment", "subscription"]):
-        category = "billing"
-    elif any(w in msg for w in ["ship", "deliver", "tracking", "package", "order", "arrived"]):
-        category = "shipping"
-    elif any(w in msg for w in ["return", "broken", "defective", "replace", "damaged"]):
-        category = "returns"
-    elif any(w in msg for w in ["login", "password", "account", "crash", "error", "bug", "app"]):
-        category = "technical"
-    else:
-        category = "general"
-
-    # All urgent messages get high priority
-    priority = "high" if any(w in msg for w in [
-        "immediately", "urgent", "asap", "emergency", "frustrating",
-        "now", "event", "weekend", "work", "important"
-    ]) else "medium"
-
-    metadata = obs.get("metadata", {})
-    has_reply = metadata.get("has_reply", False)
-    has_note = metadata.get("has_note", False)
-    is_resolved = metadata.get("is_resolved", False)
-
-    # Action sequence based on what's been done
-    if obs.get("category") is None:
-        return {"action_type": "classify", "category": category}
-    elif obs.get("priority") is None:
-        return {"action_type": "set_priority", "priority": priority}
-    elif not has_reply and task_id in ["task2", "task3"]:
-        return {
-            "action_type": "draft_reply",
-            "reply_text": (
-                f"Dear Customer, we sincerely apologize for the inconvenience you've experienced. "
-                f"We understand how frustrating this situation must be and want to resolve it immediately. "
-                f"Our team will investigate this matter and contact you within 24 hours with a full update. "
-                f"We appreciate your patience and are committed to making this right for you."
-            )
-        }
-    elif not has_note and task_id == "task3":
-        return {
-            "action_type": "add_note",
-            "note": f"Internal: Customer issue categorized as {category}. Requires urgent follow-up and resolution. Priority: {priority}."
-        }
-    else:
-        return {
-            "action_type": "resolve",
-            "resolution_summary": (
-                f"Issue resolved: Customer concern regarding {category} has been addressed. "
-                f"Full refund or replacement has been processed as appropriate. "
-                f"Customer has been notified and the ticket is now closed."
-            )
-        }
+def ask_llm(client, messages, model):
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.0,
+            max_tokens=512,
+        )
+        raw = resp.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            raw = parts[1] if len(parts) > 1 else raw
+            if raw.startswith("json"):
+                raw = raw[4:]
+        return json.loads(raw.strip())
+    except Exception as e:
+        print(f"LLM ERROR: {e}", flush=True)
+        return None
 
 
-def run_episode(env_url, task_id):
-    """Run one episode and print structured output blocks."""
-
-    # Reset
+def run_episode(client, model, env_url, task_id):
     reset_data = call_env("POST", "/reset", env_url, params={"task_id": task_id})
     if not reset_data:
         print(f"[START] task={task_id}", flush=True)
@@ -107,18 +75,22 @@ def run_episode(env_url, task_id):
     obs = reset_data["observation"]
     print(f"[START] task={task_id}", flush=True)
 
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": f"Observation:\n{json.dumps(obs, indent=2)}"},
+    ]
+
     total_reward = 0.0
     step_num = 0
 
     while not obs.get("done", False):
         step_num += 1
-        action = get_action_for_obs(obs, step_num)
+        action_dict = ask_llm(client, messages, model)
+        if not action_dict:
+            print(f"[STEP] step={step_num} reward=0.0 action=error", flush=True)
+            break
 
-        step_data = call_env(
-            "POST", "/step", env_url,
-            payload=action,
-            params={"task_id": task_id}
-        )
+        step_data = call_env("POST", "/step", env_url, payload=action_dict, params={"task_id": task_id})
         if not step_data:
             break
 
@@ -128,13 +100,15 @@ def run_episode(env_url, task_id):
         info = step_data.get("info", {})
         done = step_data.get("done", False)
 
-        print(f"[STEP] step={step_num} reward={reward} action={action['action_type']}", flush=True)
+        print(f"[STEP] step={step_num} reward={reward} action={action_dict.get('action_type', 'unknown')}", flush=True)
 
-        if done:
-            break
+        messages.append({"role": "assistant", "content": json.dumps(action_dict)})
+        messages.append({
+            "role": "user",
+            "content": f"reward={reward}, done={done}\nNext obs:\n{json.dumps(obs, indent=2)}"
+        })
 
-        # Safety limit
-        if step_num >= 15:
+        if done or step_num >= 15:
             break
 
     final_score = round(total_reward, 4)
@@ -143,20 +117,28 @@ def run_episode(env_url, task_id):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CustomerSupport OpenEnv baseline inference")
-    parser.add_argument("--url", default=DEFAULT_ENV_URL)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--url", default=os.environ.get("ENV_URL", DEFAULT_ENV_URL))
     parser.add_argument("--task", default=None)
     args = parser.parse_args()
 
-    env_url = os.environ.get("ENV_URL", args.url)
-    tasks_to_run = [args.task] if args.task else TASKS
+    # Read ALL config from environment variables injected by the competition
+    api_base_url = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
+    api_key = os.environ.get("API_KEY", os.environ.get("OPENAI_API_KEY", "dummy"))
+    model = os.environ.get("MODEL", os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))
 
+    print(f"Using API_BASE_URL={api_base_url}", flush=True)
+    print(f"Using MODEL={model}", flush=True)
+
+    client = OpenAI(base_url=api_base_url, api_key=api_key)
+
+    tasks_to_run = [args.task] if args.task else TASKS
     scores = {}
+
     for task_id in tasks_to_run:
-        score = run_episode(env_url, task_id)
+        score = run_episode(client, model, args.url, task_id)
         scores[task_id] = score
 
-    # Print summary
     for task_id, score in scores.items():
         print(f"[RESULT] task={task_id} score={score}", flush=True)
 
