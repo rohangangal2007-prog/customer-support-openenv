@@ -277,7 +277,7 @@ def grade_task1(state: dict) -> float:
     score = 0.0
     if _category_match(state, ticket): score += 0.5
     if _priority_match(state, ticket): score += 0.5
-    return round(score, 2)
+    return round(max(0.001, min(score, 0.999)), 4)
 
 
 def grade_task2(state: dict) -> float:
@@ -299,7 +299,7 @@ def grade_task2(state: dict) -> float:
         score += _reply_score(reply, task, max_score=0.3)
         bad_hits = sum(1 for kw in task.bad_reply_keywords if kw in reply)
         if bad_hits == 0: score += 0.2
-    return round(min(score, 1.0), 2)
+    return round(max(0.001, min(score, 0.999)), 4)
 
 
 def grade_task3(state: dict) -> float:
@@ -327,7 +327,7 @@ def grade_task3(state: dict) -> float:
                          "secured", "reversed", "resolved", "credited"]
         if any(w in resolution for w in outcome_words):
             score += 0.25
-    return round(min(score, 1.0), 2)
+    return round(max(0.001, min(score, 0.999)), 4)
 
 
 GRADERS = {
