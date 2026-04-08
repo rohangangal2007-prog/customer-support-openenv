@@ -123,9 +123,9 @@ def main():
     args = parser.parse_args()
 
     # Read ALL config from environment variables injected by the competition
-    api_base_url = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
-    api_key = os.environ.get("API_KEY", os.environ.get("OPENAI_API_KEY", "dummy"))
-    model = os.environ.get("MODEL_NAME", os.environ.get("MODEL", "gpt-4o-mini"))
+    api_base_url = os.environ["API_BASE_URL"]
+    api_key = os.environ["API_KEY"]
+    model = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.1-8B-Instruct")
 
     print(f"Using API_BASE_URL={api_base_url}", flush=True)
     print(f"Using MODEL={model}", flush=True)
