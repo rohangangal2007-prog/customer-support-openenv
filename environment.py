@@ -173,7 +173,7 @@ class CustomerSupportEnv:
         self._episode_reward += reward
         self._state["step_number"] = self._steps
         obs = self._build_observation()
-        return StepResult(observation=obs, reward=round(reward, 4), done=self._done, info=info)
+        return StepResult(observation=obs, reward=round(max(0.001, min(reward, 0.999)), 4), done=self._done, info=info)
 
     def state(self) -> StateResult:
         """Return the current environment state without advancing it."""

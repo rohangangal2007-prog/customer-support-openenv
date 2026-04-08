@@ -255,7 +255,7 @@ def _reply_score(reply: str, task: Task, max_score: float) -> float:
     bad_hits = sum(1 for kw in task.bad_reply_keywords if kw in reply_lower)
     score = hit_ratio * max_score
     score -= bad_hits * 0.05
-    return round(max(0.0, min(score, max_score)), 4)
+    return round(max(0.001, min(score, 0.999)), 4)
 
 
 def _category_match(state: dict, ticket: TicketVariant) -> bool:
