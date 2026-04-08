@@ -111,7 +111,7 @@ def run_episode(client, model, env_url, task_id):
         if done or step_num >= 15:
             break
 
-    final_score = round(total_reward, 4)
+    final_score = round(max(0.001, min(total_reward, 0.999)), 4)
     print(f"[END] task={task_id} score={final_score} steps={step_num}", flush=True)
     return final_score
 
