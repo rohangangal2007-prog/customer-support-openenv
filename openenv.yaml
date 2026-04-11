@@ -1,39 +1,34 @@
-name: customer-support-env
-version: "1.0.0"
+name: customer-support-openenv
+short_description: "Customer support agent benchmark with ticket triage and resolution"
 description: >
-  A real-world customer support agent environment where an AI agent
-  processes support tickets by classifying them, setting priority,
-  drafting replies, adding internal notes, and resolving issues.
-  Rewards partial progress throughout the episode.
+  CustomerSupport OpenEnv is a real-world OpenEnv environment for structured
+  customer support agent decisions. An agent receives support tickets and must
+  classify, prioritise, draft replies, add internal notes, and resolve issues.
+  The final score rewards correct classification, empathetic replies, and
+  complete resolution. Dense intermediate rewards guide the agent throughout
+  the episode.
 
-author: your-hf-username
+author: codebyRohan
+version: "1.0.0"
 tags:
   - openenv
   - customer-support
   - nlp
   - real-world
+  - agent-benchmark
 
-tasks:
-  - id: task1
-    difficulty: easy
-    description: Classify ticket category and set priority
-    max_steps: 4
-    score_range: [0.0, 1.0]
-
-  - id: task2
-    difficulty: medium
-    description: Classify, prioritise, and draft an empathetic reply
-    max_steps: 6
-    score_range: [0.0, 1.0]
-
-  - id: task3
-    difficulty: hard
-    description: Full resolution — classify, prioritise, reply, add note, resolve
-    max_steps: 10
-    score_range: [0.0, 1.0]
+observation_space:
+  type: object
+  description: >
+    Observation includes the customer message, current ticket state,
+    conversation history, task description, step count, and metadata
+    about what actions have been taken so far.
 
 action_space:
-  type: structured
+  type: object
+  description: >
+    The agent may classify the ticket, set priority, draft a reply,
+    add an internal note, resolve, or escalate.
   actions:
     - classify
     - set_priority
@@ -42,31 +37,35 @@ action_space:
     - resolve
     - escalate
 
-observation_space:
-  ticket_id: string
-  customer_message: string
-  category: "enum(billing, technical, shipping, returns, general) | null"
-  priority: "enum(low, medium, high) | null"
-  conversation_history: "list of {role, content}"
-  task_id: string
-  task_description: string
-  step_number: integer
-  done: boolean
-  metadata: object
-
 reward:
-  type: dense
-  range: [-1.0, 1.0]
   description: >
-    Partial rewards at each step. Correct classification +0.2,
+    Dense reward at every step. Correct classification +0.2,
     correct priority +0.2, quality reply up to +0.25,
-    internal note +0.1, resolve triggers full grader score.
-    Penalties for invalid actions and max step timeout.
+    internal note +0.1, resolve triggers full grader score (0.001-0.999).
+    Penalties for invalid actions and timeout.
 
-api:
-  base_url: http://localhost:7860
-  reset: POST /reset?task_id={task_id}
-  step: POST /step?task_id={task_id}
-  state: GET /state?task_id={task_id}
-  tasks: GET /tasks
-  health: GET /health
+tasks:
+  - id: task1
+    name: "ticket-classification"
+    description: >
+      Classify a support ticket into the correct category and set
+      the appropriate priority level. Tests basic NLU and triage skill.
+    difficulty: easy
+    max_steps: 4
+
+  - id: task2
+    name: "empathetic-reply"
+    description: >
+      Classify, prioritise, and draft an empathetic reply that
+      addresses the customer's concern with a clear timeline and next steps.
+    difficulty: medium
+    max_steps: 6
+
+  - id: task3
+    name: "full-resolution"
+    description: >
+      Fully resolve a complex ticket — classify, prioritise, reply,
+      add an internal note for the team, and close with a resolution
+      summary that mentions the specific outcome.
+    difficulty: hard
+    max_steps: 10
