@@ -1,18 +1,34 @@
+#!/usr/bin/env python3
 """
-inference.py — Baseline agent for CustomerSupport OpenEnv
+Baseline inference runner for CustomerSupport OpenEnv.
 
-Uses competition's LiteLLM proxy via API_BASE_URL, API_KEY, MODEL env vars.
-Prints [START]/[STEP]/[END] structured blocks to stdout.
+Emits structured stdout lines required by the evaluator:
+    [START] task=<task_name> env=<benchmark> model=<model_name>
+    [STEP] step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
+    [END] success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
 """
 
-import os
+from __future__ import annotations
+
 import json
-import argparse
-import requests
-from openai import OpenAI
+import os
+import sys
+from typing import Optional
 
-DEFAULT_ENV_URL = "http://localhost:7860"
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
+
+import requests
+
+API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
+MODEL_NAME = os.getenv("MODEL_NAME") or "meta-llama/Llama-3.1-8B-Instruct"
+API_KEY = os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY") or ""
+ENV_URL = os.getenv("ENV_URL") or "http://localhost:7860"
+BENCHMARK = "customer-support-openenv"
 TASKS = ["task1", "task2", "task3"]
+SUCCESS_SCORE_THRESHOLD = 0.50
 
 SYSTEM_PROMPT = """You are an expert customer support agent AI.
 Respond with exactly ONE JSON action object. No markdown, no explanation.
@@ -31,116 +47,171 @@ Resolution must mention refund or replacement when relevant.
 """
 
 
-def call_env(method, path, url, payload=None, params=None):
-    full_url = url.rstrip("/") + path
+def _debug(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    error_value = (error or "null").replace("\n", " ")
+    print(
+        f"[STEP] step={step} action={action} reward={reward:.2f} "
+        f"done={str(done).lower()} error={error_value}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: list[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
+        flush=True,
+    )
+
+
+def call_env(method: str, path: str, payload=None, params=None):
+    url = ENV_URL.rstrip("/") + path
     try:
         if method == "POST":
-            r = requests.post(full_url, json=payload, params=params, timeout=15)
+            r = requests.post(url, json=payload, params=params, timeout=15)
         else:
-            r = requests.get(full_url, params=params, timeout=15)
+            r = requests.get(url, params=params, timeout=15)
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        print(f"ENV ERROR: {e}", flush=True)
+        _debug(f"ENV ERROR: {e}")
         return None
 
 
-def ask_llm(client, messages, model):
-    try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.0,
-            max_tokens=512,
+def heuristic_action(obs: dict) -> dict:
+    """Rule-based fallback agent."""
+    msg = (obs.get("customer_message") or "").lower()
+    task_id = obs.get("task_id", "task1")
+    metadata = obs.get("metadata", {})
+
+    if any(w in msg for w in ["charge", "charged", "bill", "refund", "payment", "subscription"]):
+        category = "billing"
+    elif any(w in msg for w in ["ship", "deliver", "tracking", "package", "order"]):
+        category = "shipping"
+    elif any(w in msg for w in ["return", "broken", "defective", "replace", "damaged"]):
+        category = "returns"
+    elif any(w in msg for w in ["login", "password", "account", "crash", "error", "app", "hack"]):
+        category = "technical"
+    else:
+        category = "general"
+
+    if obs.get("category") is None:
+        return {"action_type": "classify", "category": category}
+    if obs.get("priority") is None:
+        return {"action_type": "set_priority", "priority": "high"}
+    if not metadata.get("has_reply") and task_id in ["task2", "task3"]:
+        return {
+            "action_type": "draft_reply",
+            "reply_text": (
+                "We sincerely apologize for the inconvenience. We will investigate immediately "
+                "and contact you within 24 hours with a full resolution including refund or replacement if needed."
+            )
+        }
+    if not metadata.get("has_note") and task_id == "task3":
+        return {"action_type": "add_note", "note": f"Team: urgent {category} issue requires immediate follow-up."}
+    return {
+        "action_type": "resolve",
+        "resolution_summary": (
+            f"Issue resolved: {category} concern addressed. "
+            "Refund or replacement processed as appropriate. Customer notified."
         )
-        raw = resp.choices[0].message.content.strip()
+    }
+
+
+def llm_action(client, obs: dict) -> dict:
+    fallback = heuristic_action(obs)
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            temperature=0.0,
+            max_tokens=256,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": f"Observation:\n{json.dumps(obs, indent=2)}"},
+            ],
+        )
+        raw = (response.choices[0].message.content or "").strip()
         if raw.startswith("```"):
-            parts = raw.split("```")
-            raw = parts[1] if len(parts) > 1 else raw
-            if raw.startswith("json"):
-                raw = raw[4:]
+            lines = raw.splitlines()
+            raw = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
         return json.loads(raw.strip())
-    except Exception as e:
-        print(f"LLM ERROR: {e}", flush=True)
-        return None
+    except Exception as exc:
+        _debug(f"LLM ERROR: {exc}")
+        return fallback
 
 
-def run_episode(client, model, env_url, task_id):
-    reset_data = call_env("POST", "/reset", env_url, params={"task_id": task_id})
+def run_task(task_id: str, client) -> float:
+    reset_data = call_env("POST", "/reset", params={"task_id": task_id})
     if not reset_data:
-        print(f"[START] task={task_id}", flush=True)
-        print(f"[END] task={task_id} score=0.0 steps=0", flush=True)
-        return 0.0
+        log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
+        log_end(success=False, steps=0, score=0.001, rewards=[])
+        return 0.001
 
     obs = reset_data["observation"]
-    print(f"[START] task={task_id}", flush=True)
+    log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"Observation:\n{json.dumps(obs, indent=2)}"},
-    ]
+    rewards: list[float] = []
+    steps_taken = 0
+    score = 0.001
+    success = False
 
-    total_reward = 0.0
-    step_num = 0
+    try:
+        for step in range(1, 16):
+            if client is not None:
+                action = llm_action(client, obs)
+            else:
+                action = heuristic_action(obs)
 
-    while not obs.get("done", False):
-        step_num += 1
-        action_dict = ask_llm(client, messages, model)
-        if not action_dict:
-            print(f"[STEP] step={step_num} reward=0.0 action=error", flush=True)
-            break
+            step_data = call_env("POST", "/step", payload=action, params={"task_id": task_id})
+            if not step_data:
+                break
 
-        step_data = call_env("POST", "/step", env_url, payload=action_dict, params={"task_id": task_id})
-        if not step_data:
-            break
+            reward = step_data.get("reward", 0.0)
+            done = step_data.get("done", False)
+            info = step_data.get("info", {})
+            obs = step_data.get("observation", obs)
 
-        reward = step_data.get("reward", 0.0)
-        total_reward += reward
-        obs = step_data.get("observation", obs)
-        info = step_data.get("info", {})
-        done = step_data.get("done", False)
+            rewards.append(reward)
+            steps_taken = step
 
-        print(f"[STEP] step={step_num} reward={reward} action={action_dict.get('action_type', 'unknown')}", flush=True)
+            log_step(
+                step=step,
+                action=action.get("action_type", "unknown"),
+                reward=reward,
+                done=done,
+                error=info.get("error"),
+            )
 
-        messages.append({"role": "assistant", "content": json.dumps(action_dict)})
-        messages.append({
-            "role": "user",
-            "content": f"reward={reward}, done={done}\nNext obs:\n{json.dumps(obs, indent=2)}"
-        })
+            if done:
+                final_score = info.get("final_score", sum(rewards))
+                score = max(0.001, min(float(final_score), 0.999))
+                success = score >= SUCCESS_SCORE_THRESHOLD
+                break
+    except Exception as exc:
+        _debug(f"Task {task_id} failed: {exc}")
+    finally:
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
-        if done or step_num >= 15:
-            break
-
-    final_score = round(max(0.001, min(total_reward, 0.999)), 4)
-    print(f"[END] task={task_id} score={final_score} steps={step_num}", flush=True)
-    return final_score
+    return score
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--url", default=os.environ.get("ENV_URL", DEFAULT_ENV_URL))
-    parser.add_argument("--task", default=None)
-    args = parser.parse_args()
+def main() -> None:
+    client = None
+    if API_KEY and OpenAI is not None:
+        client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    else:
+        _debug("No API key found, using heuristic policy.")
 
-    # Read ALL config from environment variables injected by the competition
-    api_base_url = os.environ["API_BASE_URL"]
-    api_key = os.environ["API_KEY"]
-    model = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.1-8B-Instruct")
-
-    print(f"Using API_BASE_URL={api_base_url}", flush=True)
-    print(f"Using MODEL={model}", flush=True)
-
-    client = OpenAI(base_url=api_base_url, api_key=api_key)
-
-    tasks_to_run = [args.task] if args.task else TASKS
-    scores = {}
-
-    for task_id in tasks_to_run:
-        score = run_episode(client, model, args.url, task_id)
-        scores[task_id] = score
-
-    for task_id, score in scores.items():
-        print(f"[RESULT] task={task_id} score={score}", flush=True)
+    for task_id in TASKS:
+        run_task(task_id, client)
 
 
 if __name__ == "__main__":
