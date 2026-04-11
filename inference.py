@@ -2,7 +2,9 @@
 """
 Baseline inference runner for CustomerSupport OpenEnv.
 
-Emits structured stdout lines required by the evaluator:
+This script intentionally emits only the structured stdout lines required by
+the evaluator:
+
     [START] task=<task_name> env=<benchmark> model=<model_name>
     [STEP] step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
     [END] success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
@@ -28,22 +30,26 @@ API_KEY = os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY") or ""
 ENV_URL = os.getenv("ENV_URL") or "http://localhost:7860"
 BENCHMARK = "customer-support-openenv"
 TASKS = ["task1", "task2", "task3"]
+SEED = 42
+TEMPERATURE = 0.0
+MAX_TOKENS = 300
 SUCCESS_SCORE_THRESHOLD = 0.50
 
 SYSTEM_PROMPT = """You are an expert customer support agent AI.
-Respond with exactly ONE JSON action object. No markdown, no explanation.
+Return exactly one JSON object with one of these forms:
+{"action_type":"classify","category":"billing|technical|shipping|returns|general"}
+{"action_type":"set_priority","priority":"low|medium|high"}
+{"action_type":"draft_reply","reply_text":"..."}
+{"action_type":"add_note","note":"..."}
+{"action_type":"resolve","resolution_summary":"..."}
+{"action_type":"escalate","escalation_reason":"..."}
 
-Available actions:
-{"action_type": "classify", "category": "billing|technical|shipping|returns|general"}
-{"action_type": "set_priority", "priority": "low|medium|high"}
-{"action_type": "draft_reply", "reply_text": "..."}
-{"action_type": "add_note", "note": "..."}
-{"action_type": "resolve", "resolution_summary": "..."}
-
-For task1: classify then set_priority then resolve.
-For task2: classify then set_priority then draft_reply then resolve.
-For task3: classify then set_priority then draft_reply then add_note then resolve.
-Resolution must mention refund or replacement when relevant.
+Rules:
+- Output only valid JSON, no markdown or explanation.
+- For task1: classify then set_priority then resolve.
+- For task2: classify then set_priority then draft_reply then resolve.
+- For task3: classify then set_priority then draft_reply then add_note then resolve.
+- Resolution must mention refund or replacement when relevant.
 """
 
 
@@ -82,12 +88,12 @@ def call_env(method: str, path: str, payload=None, params=None):
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        _debug(f"ENV ERROR: {e}")
+        _debug(f"[DEBUG] ENV ERROR: {e}")
         return None
 
 
-def heuristic_action(obs: dict) -> dict:
-    """Rule-based fallback agent."""
+def _heuristic_action(obs: dict) -> dict:
+    """Rule-based fallback — runs when LLM is unavailable."""
     msg = (obs.get("customer_message") or "").lower()
     task_id = obs.get("task_id", "task1")
     metadata = obs.get("metadata", {})
@@ -111,44 +117,59 @@ def heuristic_action(obs: dict) -> dict:
         return {
             "action_type": "draft_reply",
             "reply_text": (
-                "We sincerely apologize for the inconvenience. We will investigate immediately "
-                "and contact you within 24 hours with a full resolution including refund or replacement if needed."
+                "We sincerely apologize for the inconvenience you have experienced. "
+                "We will investigate this immediately and contact you within 24 hours "
+                "with a full resolution including refund or replacement if needed."
             )
         }
     if not metadata.get("has_note") and task_id == "task3":
-        return {"action_type": "add_note", "note": f"Team: urgent {category} issue requires immediate follow-up."}
+        return {
+            "action_type": "add_note",
+            "note": f"Internal: urgent {category} issue, requires immediate follow-up and resolution."
+        }
     return {
         "action_type": "resolve",
         "resolution_summary": (
-            f"Issue resolved: {category} concern addressed. "
-            "Refund or replacement processed as appropriate. Customer notified."
+            f"Issue resolved: {category} concern has been fully addressed. "
+            "Refund or replacement processed as appropriate. Customer notified of outcome."
         )
     }
 
 
-def llm_action(client, obs: dict) -> dict:
-    fallback = heuristic_action(obs)
+def _parse_action(text: str) -> Optional[dict]:
+    try:
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.splitlines()
+            cleaned = "\n".join(lines[1:-1] if lines and lines[-1].strip() == "```" else lines[1:])
+        return json.loads(cleaned)
+    except Exception:
+        return None
+
+
+def _llm_action(client, obs: dict) -> dict:
+    heuristic = _heuristic_action(obs)
     try:
         response = client.chat.completions.create(
             model=MODEL_NAME,
-            temperature=0.0,
-            max_tokens=256,
+            temperature=TEMPERATURE,
+            max_tokens=MAX_TOKENS,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": f"Observation:\n{json.dumps(obs, indent=2)}"},
             ],
         )
-        raw = (response.choices[0].message.content or "").strip()
-        if raw.startswith("```"):
-            lines = raw.splitlines()
-            raw = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-        return json.loads(raw.strip())
+        content = (response.choices[0].message.content or "").strip()
+        parsed = _parse_action(content)
+        if parsed is None:
+            return heuristic
+        return parsed
     except Exception as exc:
-        _debug(f"LLM ERROR: {exc}")
-        return fallback
+        _debug(f"[DEBUG] Model request failed: {exc}")
+        return heuristic
 
 
-def run_task(task_id: str, client) -> float:
+def run_task(task_id: str, client: Optional[object]) -> float:
     reset_data = call_env("POST", "/reset", params={"task_id": task_id})
     if not reset_data:
         log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
@@ -156,19 +177,19 @@ def run_task(task_id: str, client) -> float:
         return 0.001
 
     obs = reset_data["observation"]
-    log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
-
     rewards: list[float] = []
     steps_taken = 0
     score = 0.001
     success = False
 
+    log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
+
     try:
         for step in range(1, 16):
             if client is not None:
-                action = llm_action(client, obs)
+                action = _llm_action(client, obs)
             else:
-                action = heuristic_action(obs)
+                action = _heuristic_action(obs)
 
             step_data = call_env("POST", "/step", payload=action, params={"task_id": task_id})
             if not step_data:
@@ -191,12 +212,17 @@ def run_task(task_id: str, client) -> float:
             )
 
             if done:
-                final_score = info.get("final_score", sum(rewards))
-                score = max(0.001, min(float(final_score), 0.999))
+                final = info.get("final_score")
+                if final is not None:
+                    score = float(final)
+                else:
+                    score = sum(rewards)
+                score = max(0.001, min(score, 0.999))
                 success = score >= SUCCESS_SCORE_THRESHOLD
                 break
     except Exception as exc:
-        _debug(f"Task {task_id} failed: {exc}")
+        _debug(f"[DEBUG] Task {task_id} failed: {exc}")
+        return score
     finally:
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
@@ -204,11 +230,11 @@ def run_task(task_id: str, client) -> float:
 
 
 def main() -> None:
-    client = None
+    client: Optional[object] = None
     if API_KEY and OpenAI is not None:
         client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-    else:
-        _debug("No API key found, using heuristic policy.")
+    elif API_KEY and OpenAI is None:
+        _debug("[DEBUG] openai package unavailable, falling back to heuristic policy.")
 
     for task_id in TASKS:
         run_task(task_id, client)

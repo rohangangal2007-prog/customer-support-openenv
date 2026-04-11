@@ -5,18 +5,27 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "customer-support-openenv"
 version = "1.0.0"
-description = "OpenEnv-compliant customer support RL environment"
+description = "Real-world customer support agent benchmark — an OpenEnv environment"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
+authors = [
+  { name = "codebyRohan" }
+]
+keywords = ["openenv", "customer-support", "reinforcement-learning", "nlp"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
 dependencies = [
-    "fastapi>=0.111.0",
-    "uvicorn[standard]>=0.29.0",
-    "pydantic>=2.0.0",
-    "openai>=1.0.0",
-    "requests>=2.31.0",
-    "pyyaml>=6.0",
-    "openenv-core>=0.2.0",
+  "pydantic>=2.0.0",
+  "openai>=1.0.0",
+  "pyyaml>=6.0",
+  "fastapi>=0.111.0",
+  "uvicorn[standard]>=0.29.0",
+  "requests>=2.31.0",
+  "openenv-core>=0.2.0",
 ]
 
 [project.scripts]
@@ -29,3 +38,6 @@ Repository = "https://github.com/rohangangal2007-prog/customer-support-openenv"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["server*"]
+
+[tool.setuptools.package-data]
+server = ["*.yaml", "*.json"]
